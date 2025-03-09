@@ -42,7 +42,6 @@ namespace FileTransferWeb.Controllers
             return View();
         }
 
-        // Gửi file qua mạng
         [HttpPost]
         public IActionResult SendFile(string fileName, string ip, int port)
         {
@@ -51,14 +50,21 @@ namespace FileTransferWeb.Controllers
             {
                 try
                 {
+                    byte[] fileBytes = System.IO.File.ReadAllBytes(filePath);
+                    uint[] dataBlocks = ConvertToUintArray(fileBytes);
+                    uint[] encryptedData = AES128Helper.Encrypt(dataBlocks);
+
                     TcpClient client = new TcpClient(ip, port);
-                    using (NetworkStream stream = client.GetStream())
-                    using (FileStream fs = new FileStream(filePath, FileMode.Open))
-                    {
-                        fs.CopyTo(stream);
-                    }
+                    using NetworkStream stream = client.GetStream();
+                    using BinaryWriter writer = new BinaryWriter(stream);
+
+                    writer.Write(fileName);
+                    writer.Write(encryptedData.Length);
+                    foreach (uint block in encryptedData)
+                        writer.Write(block);
+
                     client.Close();
-                    ViewBag.Message = "File đã được gửi!";
+                    ViewBag.Message = "File đã được gửi (đã mã hóa)!";
                 }
                 catch
                 {
@@ -72,6 +78,7 @@ namespace FileTransferWeb.Controllers
             return View("Upload");
         }
 
+
         // Nhận file
         [HttpGet]
         public IActionResult Receive()
@@ -82,19 +89,30 @@ namespace FileTransferWeb.Controllers
         [HttpPost]
         public IActionResult ReceiveFile(int port)
         {
-            string savePath = Path.Combine(uploadFolder, "received_file.txt");
             try
             {
                 TcpListener listener = new TcpListener(System.Net.IPAddress.Any, port);
                 listener.Start();
-                using (TcpClient client = listener.AcceptTcpClient())
-                using (NetworkStream stream = client.GetStream())
-                using (FileStream fs = new FileStream(savePath, FileMode.Create))
-                {
-                    stream.CopyTo(fs);
-                }
+
+                using TcpClient client = listener.AcceptTcpClient();
+                using NetworkStream stream = client.GetStream();
+                using BinaryReader reader = new BinaryReader(stream);
+
+                string fileName = reader.ReadString();
+                int dataSize = reader.ReadInt32();
+
+                uint[] encryptedData = new uint[dataSize];
+                for (int i = 0; i < dataSize; i++)
+                    encryptedData[i] = reader.ReadUInt32();
+
+                uint[] decryptedData = AES128Helper.Decrypt(encryptedData);
+                byte[] fileBytes = ConvertToByteArray(decryptedData);
+
+                string savePath = Path.Combine(uploadFolder, "decrypted_" + fileName);
+                System.IO.File.WriteAllBytes(savePath, fileBytes);
+
                 listener.Stop();
-                ViewBag.Message = "Đã nhận file!";
+                ViewBag.Message = "Đã nhận và giải mã file!";
             }
             catch
             {
@@ -102,5 +120,34 @@ namespace FileTransferWeb.Controllers
             }
             return View("Receive");
         }
+        public static uint[] ConvertToUintArray(byte[] data)
+        {
+            int length = (data.Length + 3) / 4; // Chia thành các khối 4 byte
+            uint[] uintArray = new uint[length];
+
+            for (int i = 0; i < data.Length; i++)
+            {
+                int index = i / 4;
+                uintArray[index] |= (uint)(data[i] << (24 - (i % 4) * 8)); // Ghép 4 byte thành 1 uint
+            }
+
+            return uintArray;
+        }
+        public static byte[] ConvertToByteArray(uint[] uintArray)
+        {
+            byte[] byteArray = new byte[uintArray.Length * 4];
+
+            for (int i = 0; i < uintArray.Length; i++)
+            {
+                byteArray[i * 4] = (byte)((uintArray[i] >> 24) & 0xFF);
+                byteArray[i * 4 + 1] = (byte)((uintArray[i] >> 16) & 0xFF);
+                byteArray[i * 4 + 2] = (byte)((uintArray[i] >> 8) & 0xFF);
+                byteArray[i * 4 + 3] = (byte)(uintArray[i] & 0xFF);
+            }
+
+            return byteArray;
+        }
+
+
     }
 }
