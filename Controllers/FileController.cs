@@ -75,9 +75,33 @@ namespace FileTransferWeb.Controllers
                 TcpClient client = null;
                 try
                 {
+                    // Read file and convert to uint array
                     byte[] fileBytes = System.IO.File.ReadAllBytes(filePath);
-                    byte[] encryptedData = AesHelper.Encrypt(fileBytes);
+                    string fileContent = System.Text.Encoding.UTF8.GetString(fileBytes);
+                    uint[] dataToEncrypt = Aes256Helper.StringToUintArray(fileContent);
 
+                    // Generate encryption key
+                    uint[] encryptionKey = new uint[8]; // 256-bit key
+                    using (var rng = new System.Security.Cryptography.RNGCryptoServiceProvider())
+                    {
+                        byte[] keyBytes = new byte[32];
+                        rng.GetBytes(keyBytes);
+                        for (int i = 0; i < 8; i++)
+                        {
+                            encryptionKey[i] = BitConverter.ToUInt32(keyBytes, i * 4);
+                        }
+                    }
+
+                    // Encrypt data in blocks
+                    List<uint[]> encryptedBlocks = new List<uint[]>();
+                    for (int i = 0; i < dataToEncrypt.Length; i += 4)
+                    {
+                        uint[] block = new uint[4];
+                        Array.Copy(dataToEncrypt, i, block, 0, Math.Min(4, dataToEncrypt.Length - i));
+                        encryptedBlocks.Add(Aes256Helper.MahoaAES(block, encryptionKey));
+                    }
+
+                    // Connect and send data
                     client = new TcpClient();
                     var result = client.BeginConnect(ip, port, null, null);
                     var success = result.AsyncWaitHandle.WaitOne(NetworkTimeout);
@@ -91,19 +115,32 @@ namespace FileTransferWeb.Controllers
                     using (BinaryWriter writer = new BinaryWriter(stream))
                     {
                         writer.Write(fileName);
-                        writer.Write(encryptedData.Length);
-                        writer.Write(encryptedData);
+                        // Send encryption key first
+                        foreach (uint keyPart in encryptionKey)
+                        {
+                            writer.Write(keyPart);
+                        }
+                        // Send number of blocks
+                        writer.Write(encryptedBlocks.Count);
+                        // Send each encrypted block
+                        foreach (var block in encryptedBlocks)
+                        {
+                            foreach (uint value in block)
+                            {
+                                writer.Write(value);
+                            }
+                        }
                     }
 
-                    ViewBag.Message = "File đã được gửi (đã mã hóa)!";
+                    ViewBag.Message = "File đã được gửi (đã mã hóa AES-256)!";
                 }
                 catch (SocketException)
                 {
                     ViewBag.Message = "Lỗi kết nối: Không thể kết nối đến máy nhận!";
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    ViewBag.Message = "Lỗi khi gửi file!";
+                    ViewBag.Message = $"Lỗi khi gửi file: {ex.Message}";
                 }
                 finally
                 {
@@ -148,22 +185,53 @@ namespace FileTransferWeb.Controllers
                     using (BinaryReader reader = new BinaryReader(stream))
                     {
                         string fileName = reader.ReadString();
-                        int dataSize = reader.ReadInt32();
 
-                        if (dataSize > MaxFileSize)
+                        // Read encryption key
+                        uint[] encryptionKey = new uint[8];
+                        for (int i = 0; i < 8; i++)
                         {
-                            throw new Exception("File quá lớn!");
+                            encryptionKey[i] = reader.ReadUInt32();
                         }
 
-                        byte[] encryptedData = reader.ReadBytes(dataSize);
-                        byte[] decryptedData = AesHelper.Decrypt(encryptedData);
+                        // Read number of blocks
+                        int blockCount = reader.ReadInt32();
+                        List<uint[]> encryptedBlocks = new List<uint[]>();
+
+                        // Read each encrypted block
+                        for (int i = 0; i < blockCount; i++)
+                        {
+                            uint[] block = new uint[4];
+                            for (int j = 0; j < 4; j++)
+                            {
+                                block[j] = reader.ReadUInt32();
+                            }
+                            encryptedBlocks.Add(block);
+                        }
+
+                        // Decrypt blocks
+                        List<uint[]> decryptedBlocks = new List<uint[]>();
+                        foreach (var block in encryptedBlocks)
+                        {
+                            decryptedBlocks.Add(Aes256Helper.GiaimaAES(block, encryptionKey));
+                        }
+
+                        // Combine all decrypted blocks
+                        uint[] decryptedData = new uint[decryptedBlocks.Count * 4];
+                        for (int i = 0; i < decryptedBlocks.Count; i++)
+                        {
+                            Array.Copy(decryptedBlocks[i], 0, decryptedData, i * 4, 4);
+                        }
+
+                        // Convert back to string and then to bytes
+                        string decryptedText = Aes256Helper.UintArrayToString(decryptedData);
+                        byte[] decryptedBytes = System.Text.Encoding.UTF8.GetBytes(decryptedText);
 
                         string savePath = Path.Combine(uploadFolder, "decrypted_" + fileName);
-                        System.IO.File.WriteAllBytes(savePath, decryptedData);
+                        System.IO.File.WriteAllBytes(savePath, decryptedBytes);
                     }
                 }
 
-                ViewBag.Message = "Đã nhận và giải mã file!";
+                ViewBag.Message = "Đã nhận và giải mã file thành công!";
             }
             catch (Exception ex)
             {
